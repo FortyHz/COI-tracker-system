@@ -50,19 +50,24 @@ def download_file_from_supabase(file_path: str):
 
 async def extract_data_with_gemini_raw(file_bytes):
     """
-    Sends file to Gemini via raw HTTP request to bypass broken SDKs.
+    Sends file to Gemini via raw HTTP request.
+    Implements a Fallback Loop to handle '404 Model Not Found' errors 
+    caused by Google's API naming churn.
     """
-    # 1. Prepare URL (Using the reliable v1beta REST endpoint)
-    # We use 'gemini-1.5-flash' which is the standard stable tag
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
-    # 2. Prepare Headers
+    # The Hit List: Try these models in order until one works.
+    target_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-pro" # Last resort fallback
+    ]
+    
+    # Prepare common payload elements
+    b64_data = base64.b64encode(file_bytes).decode('utf-8')
     headers = {"Content-Type": "application/json"}
     
-    # 3. Encode File to Base64
-    b64_data = base64.b64encode(file_bytes).decode('utf-8')
-    
-    # 4. Construct Payload
     prompt_text = """
     You are a strictly logical Data Extraction Engine.
     Analyze this Certificate of Insurance (COI) PDF. 
@@ -94,29 +99,44 @@ async def extract_data_with_gemini_raw(file_bytes):
         }]
     }
 
-    # 5. Execute Request
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(url, headers=headers, json=payload, timeout=60.0)
-            response.raise_for_status()
-            result = response.json()
+        last_error = None
+        
+        for model_name in target_models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            logger.info(f"Attempting extraction with model: {model_name}")
             
-            # 6. Parse Response
-            # Gemini REST structure: candidates[0].content.parts[0].text
             try:
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                clean_text = text.replace("```json", "").replace("```", "").strip()
-                return json.loads(clean_text)
-            except (KeyError, IndexError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to parse Gemini JSON: {result}")
-                raise ValueError(f"Invalid JSON structure from AI: {e}")
+                response = await client.post(url, headers=headers, json=payload, timeout=60.0)
                 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Gemini API Error: {e.response.text}")
-            raise ValueError(f"Gemini API returned {e.response.status_code}")
-        except Exception as e:
-            logger.error(f"Network/Protocol Error: {e}")
-            raise e
+                # If 404, log and try next model
+                if response.status_code == 404:
+                    logger.warning(f"Model {model_name} not found (404). Retrying next...")
+                    continue
+                
+                # If other error, raise it
+                response.raise_for_status()
+                result = response.json()
+                
+                # Parse Success
+                try:
+                    text = result['candidates'][0]['content']['parts'][0]['text']
+                    clean_text = text.replace("```json", "").replace("```", "").strip()
+                    logger.info(f"SUCCESS: Extracted using {model_name}")
+                    return json.loads(clean_text)
+                except (KeyError, IndexError, json.JSONDecodeError) as e:
+                    logger.error(f"Failed to parse Gemini JSON from {model_name}: {result}")
+                    raise ValueError(f"Invalid JSON structure: {e}")
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP Error on {model_name}: {e.response.text}")
+                last_error = e
+            except Exception as e:
+                logger.error(f"Connection Error on {model_name}: {e}")
+                last_error = e
+        
+        # If we exit the loop, nothing worked
+        raise ValueError(f"All model attempts failed. Last error: {last_error}")
 
 @app.post("/webhook/process-coi")
 async def process_coi_webhook(payload: WebhookPayload):
@@ -130,7 +150,7 @@ async def process_coi_webhook(payload: WebhookPayload):
         # Download
         file_bytes = download_file_from_supabase(document_url)
         
-        # Extract (Now Async and Raw)
+        # Extract (Now with Fallback Loop)
         extracted_data = await extract_data_with_gemini_raw(file_bytes)
         logger.info(f"Extraction Success: {extracted_data}")
         
