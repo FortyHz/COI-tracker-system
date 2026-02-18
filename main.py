@@ -1,10 +1,11 @@
 import os
 import json
 import logging
+import base64
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
-import google.generativeai as genai
 from datetime import datetime
 
 # --- CONFIGURATION ---
@@ -20,9 +21,7 @@ try:
 except Exception as e:
     print(f"CRITICAL: Failed to init Supabase: {e}")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
+if not GEMINI_API_KEY:
     print("CRITICAL: Missing GEMINI_API_KEY")
 
 app = FastAPI(title="The Liability Shield - The Eye")
@@ -34,7 +33,6 @@ class WebhookPayload(BaseModel):
     type: str
     table: str
     record: dict
-    # Fix: 'schema' shadows a Pydantic attribute, so we map it from the JSON key 'schema' to a python variable 'schema_name'
     schema_name: str = Field(alias="schema") 
     old_record: dict | None = None
 
@@ -50,11 +48,22 @@ def download_file_from_supabase(file_path: str):
         logger.error(f"Failed to download file: {e}")
         raise HTTPException(status_code=500, detail="Storage Download Failed")
 
-def extract_data_with_gemini(file_bytes):
-    # FIX: Use the specific, stable model version
-    model = genai.GenerativeModel("gemini-1.5-flash-001")
+async def extract_data_with_gemini_raw(file_bytes):
+    """
+    Sends file to Gemini via raw HTTP request to bypass broken SDKs.
+    """
+    # 1. Prepare URL (Using the reliable v1beta REST endpoint)
+    # We use 'gemini-1.5-flash' which is the standard stable tag
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
-    prompt = """
+    # 2. Prepare Headers
+    headers = {"Content-Type": "application/json"}
+    
+    # 3. Encode File to Base64
+    b64_data = base64.b64encode(file_bytes).decode('utf-8')
+    
+    # 4. Construct Payload
+    prompt_text = """
     You are a strictly logical Data Extraction Engine.
     Analyze this Certificate of Insurance (COI) PDF. 
     
@@ -71,17 +80,43 @@ def extract_data_with_gemini(file_bytes):
     If a field is missing or illegible, return null.
     """
     
-    try:
-        response = model.generate_content([
-            {"mime_type": "application/pdf", "data": file_bytes},
-            prompt
-        ])
-        
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception as e:
-        logger.error(f"Gemini Extraction Failed: {e}")
-        raise HTTPException(status_code=500, detail=f"AI Extraction Failed: {str(e)}")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt_text},
+                {
+                    "inline_data": {
+                        "mime_type": "application/pdf",
+                        "data": b64_data
+                    }
+                }
+            ]
+        }]
+    }
+
+    # 5. Execute Request
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload, timeout=60.0)
+            response.raise_for_status()
+            result = response.json()
+            
+            # 6. Parse Response
+            # Gemini REST structure: candidates[0].content.parts[0].text
+            try:
+                text = result['candidates'][0]['content']['parts'][0]['text']
+                clean_text = text.replace("```json", "").replace("```", "").strip()
+                return json.loads(clean_text)
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                logger.error(f"Failed to parse Gemini JSON: {result}")
+                raise ValueError(f"Invalid JSON structure from AI: {e}")
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Gemini API Error: {e.response.text}")
+            raise ValueError(f"Gemini API returned {e.response.status_code}")
+        except Exception as e:
+            logger.error(f"Network/Protocol Error: {e}")
+            raise e
 
 @app.post("/webhook/process-coi")
 async def process_coi_webhook(payload: WebhookPayload):
@@ -92,10 +127,14 @@ async def process_coi_webhook(payload: WebhookPayload):
     document_url = record['document_url']
     
     try:
+        # Download
         file_bytes = download_file_from_supabase(document_url)
-        extracted_data = extract_data_with_gemini(file_bytes)
+        
+        # Extract (Now Async and Raw)
+        extracted_data = await extract_data_with_gemini_raw(file_bytes)
         logger.info(f"Extraction Success: {extracted_data}")
         
+        # Validate Dates
         exp_date_str = extracted_data.get("policy_expiration_date")
         status = "active"
         
@@ -109,6 +148,7 @@ async def process_coi_webhook(payload: WebhookPayload):
         else:
             status = "error"
             
+        # Update DB
         update_data = {
             "carrier_name": extracted_data.get("insurer_name"),
             "policy_number": "PENDING",
