@@ -8,19 +8,25 @@ import google.generativeai as genai
 from datetime import datetime
 
 # --- CONFIGURATION ---
-# Load from Environment Variables
-# CRITICAL: Use the SERVICE_ROLE key here, not the Anon key. 
-# The backend needs full admin rights to update the database rows.
+# Load from Environment Variables (Set these in Render)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY") 
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MUST be the SERVICE_ROLE key to write to DB
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # Initialize Clients
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY environment variables")
+    # Fail fast if env vars are missing
+    print("CRITICAL: Missing SUPABASE_URL or SUPABASE_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    print(f"CRITICAL: Failed to init Supabase: {e}")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("CRITICAL: Missing GEMINI_API_KEY")
 
 # Initialize App
 app = FastAPI(title="The Liability Shield - The Eye")
@@ -42,8 +48,11 @@ def download_file_from_supabase(file_path: str):
     """Downloads the file bytes from Supabase Storage."""
     try:
         # The frontend sends the file path relative to the bucket root (e.g., "0.123.pdf")
-        logger.info(f"Downloading {file_path} from bucket 'cois'...")
-        data = supabase.storage.from_("cois").download(file_path)
+        # Ensure we are just using the filename if that's how it was uploaded
+        clean_path = file_path.replace("cois/", "")
+        
+        logger.info(f"Downloading {clean_path} from bucket 'cois'...")
+        data = supabase.storage.from_("cois").download(clean_path)
         return data
     except Exception as e:
         logger.error(f"Failed to download file: {e}")
@@ -51,8 +60,9 @@ def download_file_from_supabase(file_path: str):
 
 def extract_data_with_gemini(file_bytes):
     """Sends file to Gemini 1.5 Flash for extraction."""
-    # Use the 1.5 Flash model - it's fast and cheap/free
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # CHANGED: Use the specific -001 version to avoid 404s on some SDK versions
+    # This is the fix for the "404 models/gemini-1.5-flash is not found" error
+    model = genai.GenerativeModel("gemini-1.5-flash-001")
     
     prompt = """
     You are a strictly logical Data Extraction Engine.
@@ -82,6 +92,7 @@ def extract_data_with_gemini(file_bytes):
         return json.loads(text)
     except Exception as e:
         logger.error(f"Gemini Extraction Failed: {e}")
+        # Pass the specific error up so we can see it in logs
         raise HTTPException(status_code=500, detail=f"AI Extraction Failed: {str(e)}")
 
 @app.post("/webhook/process-coi")
