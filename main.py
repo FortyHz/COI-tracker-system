@@ -64,11 +64,12 @@ async def extract_data_with_gemini_raw(file_bytes, file_path: str):
 
     logger.info(f"Setting payload MIME type to: {mime_type}")
 
-    # The Hit List
+    # The Modern Hit List (2026+ Architectures First)
     target_models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
         "gemini-1.5-flash",
-        "gemini-1.5-flash-001",
-        "gemini-1.5-flash-latest"
+        "gemini-1.5-flash-8b"
     ]
     
     b64_data = base64.b64encode(file_bytes).decode('utf-8')
@@ -115,6 +116,7 @@ async def extract_data_with_gemini_raw(file_bytes, file_path: str):
                 response = await client.post(url, headers=headers, json=payload, timeout=60.0)
                 
                 if response.status_code == 404:
+                    logger.warning(f"Model {model_name} 404. Google says: {response.text}")
                     continue
                 
                 response.raise_for_status()
@@ -129,11 +131,13 @@ async def extract_data_with_gemini_raw(file_bytes, file_path: str):
                     raise ValueError(f"Invalid JSON structure: {e}")
 
             except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP Error on {model_name}: {e.response.text}")
                 last_error = e.response.text
             except Exception as e:
-                last_error = e
+                logger.error(f"Connection Error on {model_name}: {e}")
+                last_error = str(e)
         
-        raise ValueError(f"All models failed. Likely invalid API Key source. Last error: {last_error}")
+        raise ValueError(f"All models failed. Last API response: {last_error}")
 
 @app.post("/webhook/process-coi")
 async def process_coi_webhook(payload: WebhookPayload):
