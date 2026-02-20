@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 from datetime import datetime
+from nag_engine import run_nag_cycle
 
 # --- CONFIGURATION ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -155,6 +156,16 @@ async def process_coi_webhook(payload: WebhookPayload):
     except Exception as e:
         logger.error(f"Processing failed: {e}")
         supabase.table("policies").update({"processing_status": "error"}).eq("id", policy_id).execute()
+        return {"status": "error", "message": str(e)}
+
+@app.get("/trigger-nag")
+def trigger_nag():
+    """Hidden switch to wake the Nag Engine from the web."""
+    try:
+        run_nag_cycle()
+        return {"status": "success", "message": "Assassin awake. Cycle executed. Check Render logs."}
+    except Exception as e:
+        logger.error(f"Nag Engine failed to execute: {e}")
         return {"status": "error", "message": str(e)}
 
 @app.get("/")
