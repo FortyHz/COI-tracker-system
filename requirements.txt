@@ -2,5 +2,7 @@ fastapi
 uvicorn
 pydantic
 supabase
-httpx
+google-generativeai
 python-multipart
+httpx
+resend
