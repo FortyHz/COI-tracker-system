@@ -61,7 +61,7 @@ def send_email(policy):
     else:
         # FALLBACK: If you upload a test PDF without linking a vendor, it shoots here.
         # CHANGE THIS to your own email address to test the live ammo.
-        target_email = "your.actual.email@gmail.com" 
+        target_email = "mlodic.blue@gmail.com" 
         vendor_name = "Valued Vendor"
     
     subject = f"ACTION REQUIRED: Insurance Certificate Expiring - {carrier}"
@@ -117,3 +117,4 @@ def run_nag_cycle():
 
 if __name__ == "__main__":
     run_nag_cycle()
+
