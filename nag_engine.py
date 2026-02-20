@@ -52,6 +52,7 @@ def send_email(policy):
     carrier = policy.get("carrier_name", "Unknown Carrier")
     exp_date = policy.get("expiration_date")
     doc_id = policy.get("id")
+    vendor_id = policy.get("vendor_id") # IDENTITY ROUTING: Grab the exact target ID
     
     # Extract vendor data if it exists (Target Mapping)
     vendor_data = policy.get("vendors")
@@ -64,6 +65,10 @@ def send_email(policy):
         target_email = "mlodic.blue@gmail.com" 
         vendor_name = "Valued Vendor"
     
+    # IDENTITY ROUTING: Construct the Magic Link
+    frontend_url = "https://your-frontend-url.com" # We will replace this with your actual React URL later
+    magic_link = f"{frontend_url}/?vendor={vendor_id}" if vendor_id else frontend_url
+    
     subject = f"ACTION REQUIRED: Insurance Certificate Expiring - {carrier}"
     
     body = f"""
@@ -75,7 +80,7 @@ def send_email(policy):
     To maintain your active vendor status and avoid payment holds, please upload 
     your renewed Certificate of Insurance to our secure portal immediately.
     
-    Portal Link: https://your-frontend-url.com
+    Portal Link: {magic_link}
     Reference ID: {doc_id}
     
     This is an automated message from The Liability Shield.
@@ -117,4 +122,3 @@ def run_nag_cycle():
 
 if __name__ == "__main__":
     run_nag_cycle()
-
