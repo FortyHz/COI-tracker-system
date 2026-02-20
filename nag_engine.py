@@ -2,10 +2,12 @@ import os
 import logging
 from datetime import datetime, timedelta
 from supabase import create_client, Client
+import resend
 
 # --- CONFIGURATION ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # MUST be service_role key
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -16,6 +18,12 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Arm the weapon if the key is present
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
+else:
+    logger.warning("No RESEND_API_KEY found. Engine will run in MOCK mode (firing blanks).")
+
 def get_expiring_policies(days_out=30):
     """Queries the vault for policies expiring within the danger zone."""
     target_date = (datetime.now() + timedelta(days=days_out)).date()
@@ -24,11 +32,11 @@ def get_expiring_policies(days_out=30):
     logger.info(f"Scanning for policies expiring between {today} and {target_date}...")
     
     try:
-        # Note: In a full production DB, we'd join with the 'vendors' table to get the email.
-        # For the MVP, we assume we have an email or we pull it from the document metadata if needed.
-        # For now, let's just find the expiring records.
+        # STEP 2: TARGET MAPPING 
+        # The 'vendors(company_name, contact_email)' syntax tells Supabase to follow 
+        # the foreign key and grab the actual human's email attached to this document.
         response = supabase.table("policies") \
-            .select("*") \
+            .select("*, vendors(company_name, contact_email)") \
             .eq("processing_status", "active") \
             .lte("expiration_date", target_date.isoformat()) \
             .gte("expiration_date", today.isoformat()) \
@@ -39,19 +47,27 @@ def get_expiring_policies(days_out=30):
         logger.error(f"Failed to query database: {e}")
         return []
 
-def send_mock_email(policy):
-    """Simulates sending a ruthless, polite compliance email."""
+def send_email(policy):
+    """Fires a lethal or mock email depending on environment configuration."""
     carrier = policy.get("carrier_name", "Unknown Carrier")
     exp_date = policy.get("expiration_date")
     doc_id = policy.get("id")
     
-    # In reality, this goes to the vendor's email address.
-    target_email = "mlodic.blue@gmail.com"
+    # Extract vendor data if it exists (Target Mapping)
+    vendor_data = policy.get("vendors")
+    if vendor_data and vendor_data.get("contact_email"):
+        target_email = vendor_data.get("contact_email")
+        vendor_name = vendor_data.get("company_name")
+    else:
+        # FALLBACK: If you upload a test PDF without linking a vendor, it shoots here.
+        # CHANGE THIS to your own email address to test the live ammo.
+        target_email = "your.actual.email@gmail.com" 
+        vendor_name = "Valued Vendor"
     
     subject = f"ACTION REQUIRED: Insurance Certificate Expiring - {carrier}"
     
     body = f"""
-    To Whom It May Concern,
+    Dear {vendor_name},
     
     Our records indicate that your Commercial General Liability policy ({carrier}) 
     will expire on {exp_date}.
@@ -65,10 +81,24 @@ def send_mock_email(policy):
     This is an automated message from The Liability Shield.
     """
     
-    logger.info(f"--- MOCK EMAIL SENT TO {target_email} ---")
-    logger.info(f"Subject: {subject}")
-    logger.info(body)
-    logger.info("------------------------------------------")
+    # STEP 1: THE AMMO
+    if RESEND_API_KEY:
+        try:
+            # Resend requires a verified domain. However, for testing, 
+            # they allow you to send from "onboarding@resend.dev" to the email you signed up with.
+            r = resend.Emails.send({
+                "from": "onboarding@resend.dev",
+                "to": target_email,
+                "subject": subject,
+                "text": body
+            })
+            logger.info(f"LIVE ROUND FIRED: Email sent to {target_email}. Resend ID: {r.get('id')}")
+        except Exception as e:
+            logger.error(f"Misfire! Resend API rejected the email: {e}")
+    else:
+        logger.info(f"--- MOCK EMAIL SENT TO {target_email} ---")
+        logger.info(body)
+        logger.info("------------------------------------------")
 
 def run_nag_cycle():
     logger.info("Starting Daily Nag Cycle...")
@@ -81,10 +111,9 @@ def run_nag_cycle():
     logger.info(f"Found {len(expiring_policies)} non-compliant targets. Initiating email sequence.")
     
     for policy in expiring_policies:
-        send_mock_email(policy)
+        send_email(policy)
         
     logger.info("Nag cycle complete.")
 
 if __name__ == "__main__":
     run_nag_cycle()
-
