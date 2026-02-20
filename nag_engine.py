@@ -46,7 +46,7 @@ def send_mock_email(policy):
     doc_id = policy.get("id")
     
     # In reality, this goes to the vendor's email address.
-    target_email = "compliance@vendor.com" 
+    target_email = "mlodic.blue@gmail.com"
     
     subject = f"ACTION REQUIRED: Insurance Certificate Expiring - {carrier}"
     
@@ -87,3 +87,4 @@ def run_nag_cycle():
 
 if __name__ == "__main__":
     run_nag_cycle()
+
